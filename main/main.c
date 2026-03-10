@@ -1,83 +1,54 @@
-#include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_log.h"
+#include <stdio.h>
 #include "nvs_flash.h"
-#include "esp_http_server.h"
-#include "driver/gpio.h"
-
-#define LED_PIN 0
-#define EXAMPLE_ESP_WIFI_SSID      "ESP32_Server_LED"
-#define EXAMPLE_ESP_WIFI_PASS      "password123"
-
-static const char *TAG = "WEB_SERVER";
-
-// 1. Pagina HTML inviata al browser
-esp_err_t index_handler(httpd_req_t *req) {
-    const char* resp_str = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
-                           "<style>body{font-family:Arial;text-align:center;} .btn{display:block;padding:20px;margin:10px;color:white;text-decoration:none;font-size:20px;border-radius:10px;} "
-                           ".on{background-color:green;} .off{background-color:red;}</style></head>"
-                           "<body><h1>ESP32 Controllo</h1>"
-                           "<a href='/on' class='btn on'>ACCENDI</a>"
-                           "<a href='/off' class='btn off'>SPEGNI</a></body></html>";
-    httpd_resp_send(req, resp_str, strlen(resp_str));
-    return ESP_OK;
-}
-
-// 2. Azione Accendi
-esp_err_t on_handler(httpd_req_t *req) {
-    gpio_set_level(LED_PIN, 1);
-    httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_set_hdr(req, "Location", "/");
-    httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
-}
-
-// 3. Azione Spegni
-esp_err_t off_handler(httpd_req_t *req) {
-    gpio_set_level(LED_PIN, 0);
-    httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_set_hdr(req, "Location", "/");
-    httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
-}
-
-// 4. Avvio del Server
-httpd_handle_t start_webserver(void) {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    httpd_handle_t server = NULL;
-    if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_uri_t uri_idx = { .uri="/", .method=HTTP_GET, .handler=index_handler };
-        httpd_uri_t uri_on  = { .uri="/on", .method=HTTP_GET, .handler=on_handler };
-        httpd_uri_t uri_off = { .uri="/off", .method=HTTP_GET, .handler=off_handler };
-        httpd_register_uri_handler(server, &uri_idx);
-        httpd_register_uri_handler(server, &uri_on);
-        httpd_register_uri_handler(server, &uri_off);
-    }
-    return server;
-}
-
-// 5. Configurazione Wi-Fi
-void wifi_init_softap(void) {
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_ap();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    wifi_config_t wifi_config = {
-        .ap = { .ssid=EXAMPLE_ESP_WIFI_SSID, .password=EXAMPLE_ESP_WIFI_PASS, .max_connection=4, .authmode=WIFI_AUTH_WPA_WPA2_PSK },
-    };
-    esp_wifi_set_mode(WIFI_MODE_AP);
-    esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
-    esp_wifi_start();
-}
+#include "nvs.h"
+#include "esp_log.h"
 
 void app_main(void) {
-    nvs_flash_init();
-    gpio_reset_pin(LED_PIN);
-    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
-    wifi_init_softap();
-    start_webserver();
+    // 1. Inizializzazione della partizione NVS predefinita
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // Se la memoria è piena o corrotta, la cancelliamo e riproviamo
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    // 2. Apertura di un "Namespace" chiamato "storage" in modalità lettura/scrittura
+    nvs_handle_t my_handle;
+    printf("\nApertura NVS...");
+    err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    
+    if (err != ESP_OK) {
+        printf("Errore nell'apertura NVS (%s)\n", esp_err_to_name(err));
+    } else {
+        printf("Fatto!\n");
+
+        // 3. Lettura del valore
+        int32_t restart_counter = 0; // valore di default se non trovato
+        err = nvs_get_i32(my_handle, "restart_con", &restart_counter);
+        
+        switch (err) {
+            case ESP_OK:
+                printf("Valore letto: %d\n", (int)restart_counter);
+                break;
+            case ESP_ERR_NVS_NOT_FOUND:
+                printf("Valore non trovato, inizializzazione...\n");
+                break;
+            default:
+                printf("Errore nella lettura (%s)\n", esp_err_to_name(err));
+        }
+
+        // 4. Incremento e Scrittura
+        restart_counter++;
+        printf("Aggiornamento contatore a: %d\n", (int)restart_counter);
+        err = nvs_set_i32(my_handle, "restart_con", restart_counter);
+        printf((err != ESP_OK) ? "Scrittura fallita!\n" : "Scrittura eseguita.\n");
+
+        // 5. COMMIT: Importante! Salva effettivamente i dati sulla Flash
+        err = nvs_commit(my_handle);
+        printf((err != ESP_OK) ? "Commit fallito!\n" : "Dati salvati permanentemente.\n");
+
+        // 6. Chiusura del handle
+        nvs_close(my_handle);
+    }
 }
