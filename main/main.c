@@ -11,6 +11,10 @@
 #include "driver/gpio.h"
 #include "hal/gpio_types.h"
 #include "esp_timer.h"
+#include "rom/ets_sys.h" // Per ets_delay_us
+#include "esp_mac.h"
+
+#define DHT_GPIO 4
 
 static const char *TAG = "IOT_NODE";
 
@@ -22,23 +26,78 @@ static const char *TAG = "IOT_NODE";
 
 static esp_mqtt_client_handle_t client;
 
+static esp_err_t read_dht_raw(uint8_t data[5]) {
+    uint8_t last_state = 1;
+    uint8_t counter = 0;
+    uint8_t j = 0, i;
 
+    data[0] = data[1] = data[2] = data[3] = data[4] = 0;
+
+    // FASE 1: Segnale di Start
+    gpio_set_direction(DHT_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DHT_GPIO, 0);
+    vTaskDelay(pdMS_TO_TICKS(20)); // Almeno 18ms
+    gpio_set_level(DHT_GPIO, 1);
+    ets_delay_us(40);
+    gpio_set_direction(DHT_GPIO, GPIO_MODE_INPUT);
+
+    // FASE 2: Lettura dei 40 bit (Risposta del sensore)
+    for (i = 0; i < 85; i++) {
+        counter = 0;
+        while (gpio_get_level(DHT_GPIO) == last_state) {
+            counter++;
+            ets_delay_us(1);
+            if (counter == 255) break;
+        }
+        last_state = gpio_get_level(DHT_GPIO);
+        if (counter == 255) break;
+
+        if ((i >= 4) && (i % 2 == 0)) {
+            data[j / 8] <<= 1;
+            if (counter > 28) data[j / 8] |= 1; // Un impulso lungo significa '1'
+            j++;
+        }
+    }
+
+    // FASE 3: Verifica Checksum
+    if ((j >= 40) && (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF))) return ESP_OK;
+    return ESP_FAIL;
+}
 
 void telemetry_task(void *pvParameters) {
-    int counter = 0;
-    char data_str[20];
+    uint8_t data[5];
+    char json_string[128];
 
     while (1) {
-        // Prepariamo una stringa con un valore (es. un contatore o sensore)
-        snprintf(data_str, sizeof(data_str), "%d", counter++);
+        if (read_dht_raw(data) == ESP_OK) {
+            float h = (float)data[0];
+            float t = (float)data[2];
+
+            uint8_t mac[6];
+            esp_read_mac(mac, ESP_MAC_WIFI_STA);
+            snprintf(json_string, sizeof(json_string), 
+            "{\"dev\": \"%02X%02X\", \"temp\": %.1f, \"hum\": %.1f}", 
+                 mac[4], mac[5], t, h);
+
+            if (t > 30.0) { // Se la temperatura supera i 30 gradi
+                esp_mqtt_client_publish(client, "/casa/allarme", "{\"alert\": \"TEMPERATURA ELEVATA!\"}", 0, 1, 0);
+                ESP_LOGW(TAG, "Allarme inviato!");
+                gpio_set_level(GPIO_NUM_25, 1);
+            }
+
+            esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
+            ESP_LOGI(TAG, "DATI REALI INVIATI: %s", json_string);
+            
+        } else {
+            ESP_LOGE(TAG, "Errore lettura DHT11 (Check collegamenti/resistenza)");
+        }
+
         
-        // Inviamo al broker (Topic, Messaggio, Lunghezza (0=auto), QoS, Retain)
-        esp_mqtt_client_publish(client, "/dispositivo/stato", data_str, 0, 1, 0);
-        
-        ESP_LOGI(TAG, "Dati inviati: %s", data_str);
-        
-        // Aspetta 10 secondi
-        vTaskDelay(pdMS_TO_TICKS(10000));
+    
+            
+
+
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Aspetta 5 secondi
     }
 }
 
