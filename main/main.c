@@ -65,19 +65,23 @@ static esp_err_t read_dht_raw(uint8_t data[5]) {
 }
 
 void telemetry_task(void *pvParameters) {
+
     uint8_t data[5];
-    char json_string[128];
+    uint8_t mac[6];
+    char json_string[150];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    
 
     while (1) {
         if (read_dht_raw(data) == ESP_OK) {
             float h = (float)data[0];
             float t = (float)data[2];
 
-            uint8_t mac[6];
-            esp_read_mac(mac, ESP_MAC_WIFI_STA);
+            int64_t uptime = esp_timer_get_time() / 1000000;
+
             snprintf(json_string, sizeof(json_string), 
-            "{\"dev\": \"%02X%02X\", \"temp\": %.1f, \"hum\": %.1f}", 
-                 mac[4], mac[5], t, h);
+                "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f, \"up\":%lld}", 
+                mac[4], mac[5], t, h, uptime);
 
             if (t > 30.0) { // Se la temperatura supera i 30 gradi
                 esp_mqtt_client_publish(client, "/casa/allarme", "{\"alert\": \"TEMPERATURA ELEVATA!\"}", 0, 1, 0);
@@ -91,11 +95,6 @@ void telemetry_task(void *pvParameters) {
         } else {
             ESP_LOGE(TAG, "Errore lettura DHT11 (Check collegamenti/resistenza)");
         }
-
-        
-    
-            
-
 
         vTaskDelay(pdMS_TO_TICKS(5000)); // Aspetta 5 secondi
     }
