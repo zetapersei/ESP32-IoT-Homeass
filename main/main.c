@@ -3,7 +3,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -13,15 +12,21 @@
 #include "esp_timer.h"
 #include "rom/ets_sys.h" // Per ets_delay_us
 #include "esp_mac.h"
+#include "esp_modem_config.h"
+#include "esp_modem_api.h"
+#include "esp_netif_ppp.h"
 
 #define DHT_GPIO 4
+
+// Configurazione UART (GPIO 17 TX, 16 RX)
+#define UART_NUM UART_NUM_2
 
 static const char *TAG = "IOT_NODE";
 
 // --- CONFIGURAZIONE ---
-#define WIFI_SSID      "Duca_Home"
-#define WIFI_PASS      "4655407195808313"
+
 #define BROKER_URL     "mqtt://picogalliiotserver.ddns.net:1883" // IP Mosquitto Pubblico
+#define APN            "internet.it" // Cambia con APN della tua SIM
 
 
 static esp_mqtt_client_handle_t client;
@@ -141,79 +146,63 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-// --- GESTORE EVENTI DI RETE (Wi-Fi & IP) ---
+// --- GESTORE EVENTI DI RETE  ---
 static void network_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(TAG, "Wi-Fi Avviato. Connessione in corso...");
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "Wi-Fi perso! Riprovo tra 5 secondi...");
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+    if (event_base == IP_EVENT && event_id == IP_EVENT_PPP_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "IP Ottenuto: " IPSTR, IP2STR(&event->ip_info.ip));
-        
-        // AVVIO MQTT SOLO DOPO AVER RICEVUTO L'IP
+        ESP_LOGI(TAG, "Connesso a GPRS! IP: " IPSTR, IP2STR(&event->ip_info.ip));
         esp_mqtt_client_start(client);
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_PPP_LOST_IP) {
+        ESP_LOGW(TAG, "Connessione GPRS persa");
+        esp_mqtt_client_stop(client);
     }
 }
 
 
 
+
+
 void app_main(void) {
-    // 1. Inizializzazione NVS (Fondamentale per il Wi-Fi)
+    // 1. Inizializzazione base (NVS e Loop eventi)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(ret);
-
-    // 1. Inizializza il pin (es. il LED  è sul GPIO 25)
-    gpio_reset_pin(GPIO_NUM_25);
-    // 2. Impostalo come uscita
-    gpio_set_direction(GPIO_NUM_25, GPIO_MODE_OUTPUT);
-
-    // 2. Inizializzazione Rete
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
 
-    // 3. Registrazione Handler
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &network_event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &network_event_handler, NULL, NULL));
+    // 2. Configurazione dell'interfaccia di rete PPP
+    esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
+    esp_netif_t *esp_netif = esp_netif_new(&netif_ppp_config);
+    assert(esp_netif);
 
-    // 4. Configurazione Wi-Fi
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    // 3. Configurazione del Modem (DTE e DCE)
+    esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
+    dte_config.uart_config.port_num = UART_NUM_2;
+    dte_config.uart_config.tx_io_num = 17;
+    dte_config.uart_config.rx_io_num = 16;
+    dte_config.uart_config.baud_rate = 115200;
+    
+    esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(APN); // Cambia con APN della tua SIM
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK, // Più compatibile
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    // Creazione dell'oggetto modem per SIM800
+    esp_modem_dce_t *dce = esp_modem_new_dev(ESP_MODEM_DCE_SIM800, &dte_config, &dce_config, esp_netif);
+    assert(dce);
 
-    // 5. Configurazione MQTT (Preparazione, non avvio)
+    // 4. Registrazione handler per l'IP via PPP
+    // Quando il modem ottiene l'IP dalla rete cellulare, scatta IP_EVENT_PPP_GOT_IP
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, &network_event_handler, NULL, NULL));
+
+    // 5. Configurazione MQTT (stessa di prima, ma con timeout più lunghi)
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = BROKER_URL,
-        .task.stack_size = 8192,
-        .credentials = {
-            .username = "maurizio",
-            .authentication.password = "Ct66ubw82m",
-        },
-        .network.reconnect_timeout_ms = 5000, // Riprova ogni 5 secondi se cade la linea
+        .network.reconnect_timeout_ms = 10000, // Più tempo per il GPRS
     };
     client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
 
-    // 6. Start!
-    ESP_ERROR_CHECK(esp_wifi_start());
-    
-    // Disabilita Power Save per evitare latenze fastidiose
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    // 6. Avvio connessione modem
+    ESP_LOGI(TAG, "Connessione GPRS in corso...");
+    // Il modem inizierà la negoziazione PPP e chiamerà l'evento GOT_IP
 }
