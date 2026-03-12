@@ -33,7 +33,7 @@ RTC_DATA_ATTR float last_hum = -100.0;
 
 #define TEMP_THRESHOLD 0.5  // Invia solo se cambia di 0.5 gradi
 #define MAX_SLEEP_SEC 3600  // Massimo 1 ora di sonno
-#define WATCHDOG_TIMEOUT_SEC 30 // Se non entriamo in Deep Sleep entro 30 secondi, il watchdog resetta tutto
+#define WATCHDOG_TIMEOUT_SEC 120 // Se non entriamo in Deep Sleep entro 90 secondi, il watchdog resetta tutto
 
 #define DHT_GPIO 4
 #define MODEM_PWRKEY_PIN 13
@@ -78,7 +78,7 @@ void alarm_processor_task(void *pvParameters) {
             snprintf(alarm_msg, sizeof(alarm_msg), "{\"alarm_io\": %ld, \"status\": %d}", io_num, level);
             
             if (client != NULL) {
-                esp_mqtt_client_publish(client, "/casa/allarmi", alarm_msg, 0, 1, 0);
+                esp_mqtt_client_publish(client, "/casa/allarmi", alarm_msg, 0, 1, 1);
             }
         }
     }
@@ -180,67 +180,57 @@ void watchdog_task(void *pvParameters) {
     esp_restart();
 }
 
+// Definizione della maschera dei pin (Spostata fuori dalle funzioni)
+#define ALARM_BITMASK ((1ULL<<ALARM_PIN_1) | (1ULL<<ALARM_PIN_2) | \
+                        (1ULL<<ALARM_PIN_3) | (1ULL<<ALARM_PIN_4))
+
+void vai_in_deep_sleep_con_allarmi() {
+    esp_mqtt_client_stop(client);
+    modem_power_down();
+    
+    // Configura wake-up: Timer (15 min) + Sensori (EXT1)
+    esp_sleep_enable_timer_wakeup(900 * 1000000);
+    esp_sleep_enable_ext1_wakeup(ALARM_BITMASK, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+    ESP_LOGI(TAG, "Entro in Deep Sleep...");
+    esp_deep_sleep_start();
+}
+
 void telemetry_task(void *pvParameters) {
     uint8_t data[5];
     uint8_t mac[6];
-    int rssi = 0, ber = 0; // ber è il bit error rate, di solito meno importante
+    int rssi = 0, ber = 0;
     char json_string[180];
-    
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
-    // 1. Leggi la qualità del segnale dal modem
-    // dce è l'oggetto creato in app_main (assicurati che sia accessibile o globale)
+    // Leggi segnale
     if (esp_modem_get_signal_quality(dce, &rssi, &ber) == ESP_OK) {
-        ESP_LOGI(TAG, "Qualità segnale GSM: RSSI=%d", rssi);
+        ESP_LOGI(TAG, "RSSI: %d", rssi);
     }
 
     if (read_dht_raw(data) == ESP_OK) {
         float h = (float)data[0];
         float t = (float)data[2];
-
         float diff_t = (t > last_temp) ? (t - last_temp) : (last_temp - t);
         
-        if (diff_t >= 0.5 || last_temp == -100.0) {
+        if (diff_t >= TEMP_THRESHOLD || last_temp == -100.0) {
             last_temp = t;
-            
-            // Inseriamo l'RSSI nel JSON
             snprintf(json_string, sizeof(json_string), 
                      "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f, \"rssi\":%d}", 
                      mac[4], mac[5], t, h, rssi);
 
             if (client != NULL) {
                 esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
-                vTaskDelay(pdMS_TO_TICKS(2000));
+                vTaskDelay(pdMS_TO_TICKS(3000)); // Tempo per invio
             }
         }
-        
-        // Procedura di spegnimento e Deep Sleep
-        esp_mqtt_client_stop(client);
-        modem_power_down();
-        esp_sleep_enable_timer_wakeup(900 * 1000000); 
-        esp_deep_sleep_start();
+    } else {
+        ESP_LOGE(TAG, "Errore DHT11");
     }
 
-    // Definizione della maschera dei pin (GPIO 32, 33, 34, 35)
-#define ALARM_BITMASK ((1ULL<<GPIO_NUM_32) | (1ULL<<GPIO_NUM_33) | \
-                        (1ULL<<GPIO_NUM_34) | (1ULL<<GPIO_NUM_35))
-
-void vai_in_deep_sleep_con_allarmi() {
-    // 1. Spegnimento pulito delle periferiche
-    esp_mqtt_client_stop(client);
-    modem_power_down();
-
-    // 2. Configura il risveglio temporizzato (es. ogni 15 minuti)
-    esp_sleep_enable_timer_wakeup(900 * 1000000);
-
-    // 3. Configura il risveglio da sensori esterni (Allarmi)
-    // ESP_EXT1_WAKEUP_ANY_HIGH: si sveglia se uno dei pin va a 1 (es. PIR o contatto aperto)
-    // Se i tuoi sensori chiudono a massa (Normalmente Chiusi), usa ESP_EXT1_WAKEUP_ALL_LOW
-    esp_sleep_enable_ext1_wakeup(ALARM_BITMASK, ESP_EXT1_WAKEUP_ANY_HIGH);
-
-    ESP_LOGI(TAG, "Deep Sleep attivo. Sveglia pronta per timer o allarmi.");
-    esp_deep_sleep_start();
-    }
+    // Chiama la nuova funzione di sleep
+    vai_in_deep_sleep_con_allarmi();
+    vTaskDelete(NULL); 
 }
 
 // --- GESTORE EVENTI MQTT ---
@@ -336,6 +326,36 @@ void app_main(void) {
             break;
     }
 
+        // Blocco 1: Pin con Pull-up interno (32, 33)
+    gpio_config_t pullup_conf = {
+        .intr_type = GPIO_INTR_ANYEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL<<GPIO_NUM_32) | (1ULL<<GPIO_NUM_33),
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    gpio_config(&pullup_conf);
+
+    // Blocco 2: Pin "Input-Only" (34, 35) - NIENTE PULL-UP SOFTWARE
+    gpio_config_t input_only_conf = {
+        .intr_type = GPIO_INTR_ANYEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL<<GPIO_NUM_34) | (1ULL<<GPIO_NUM_35),
+        .pull_up_en = GPIO_PULLUP_DISABLE, // Disabilitato per evitare l'errore
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    gpio_config(&input_only_conf);
+
+    // Coda e Task Allarmi
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    xTaskCreate(alarm_processor_task, "alarm_task", 4096, NULL, 10, NULL);
+
+    // Installazione ISR
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(ALARM_PIN_1, gpio_isr_handler, (void*) ALARM_PIN_1);
+    gpio_isr_handler_add(ALARM_PIN_2, gpio_isr_handler, (void*) ALARM_PIN_2);
+    gpio_isr_handler_add(ALARM_PIN_3, gpio_isr_handler, (void*) ALARM_PIN_3);
+    gpio_isr_handler_add(ALARM_PIN_4, gpio_isr_handler, (void*) ALARM_PIN_4);
 
     modem_power_on();
 
