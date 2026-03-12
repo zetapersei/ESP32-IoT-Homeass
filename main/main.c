@@ -32,6 +32,7 @@ RTC_DATA_ATTR float last_hum = -100.0;
 
 #define TEMP_THRESHOLD 0.5  // Invia solo se cambia di 0.5 gradi
 #define MAX_SLEEP_SEC 3600  // Massimo 1 ora di sonno
+#define WATCHDOG_TIMEOUT_SEC 30 // Se non entriamo in Deep Sleep entro 30 secondi, il watchdog resetta tutto
 
 #define DHT_GPIO 4
 #define MODEM_PWRKEY_PIN 13
@@ -44,6 +45,8 @@ static const char *TAG = "IOT_NODE";
 
 static esp_mqtt_client_handle_t client;
 static esp_modem_dce_t *dce; 
+
+
 
 static esp_err_t read_dht_raw(uint8_t data[5]) {
     uint8_t last_state = 1;
@@ -119,7 +122,26 @@ void modem_power_on() {
     vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
+void watchdog_task(void *pvParameters) {
+    ESP_LOGW(TAG, "Watchdog avviato: timer di %d secondi", WATCHDOG_TIMEOUT_SEC);
+    
+    // Attendiamo il tempo limite
+    vTaskDelay(pdMS_TO_TICKS(WATCHDOG_TIMEOUT_SEC * 1000));
 
+    // Se arriviamo qui, significa che il telemetry_task non ha spento l'ESP32
+    // (quindi non siamo entrati in Deep Sleep con successo)
+    ESP_LOGE(TAG, "WATCHDOG TRIGGERATO: Il sistema non ha risposto in tempo.");
+    
+    // Proviamo a spegnere il modem prima di resettare tutto
+    modem_power_down(); 
+    
+    // Reset fisico del modem tramite PWRKEY (se spento lo accende, se acceso lo spegne)
+    // In questo caso forziamo un ciclo completo
+    modem_power_on(); 
+
+    ESP_LOGW(TAG, "Riavvio forzato del sistema...");
+    esp_restart();
+}
 
 void telemetry_task(void *pvParameters) {
     uint8_t data[5];
@@ -230,12 +252,16 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    modem_power_on();
-
+    
     // 2. Configurazione dell'interfaccia di rete PPP
     esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
     esp_netif_t *esp_netif = esp_netif_new(&netif_ppp_config);
     assert(esp_netif);
+
+
+    modem_power_on();
+
+    xTaskCreate(watchdog_task, "watchdog_task", 2048, NULL, 10, NULL);
 
     // Inizializzazione del LED/Relè sul GPIO 25
     gpio_reset_pin(GPIO_NUM_25);
