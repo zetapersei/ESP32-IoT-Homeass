@@ -82,7 +82,7 @@ static esp_err_t read_dht_raw(uint8_t data[5]) {
 }
 
 void modem_power_down() {
-    const char *cmd = "AT+CPOWD=1\r\n";
+    const char *cmd = "AT+CSCLK=2\r\n";
     ESP_LOGI(TAG, "Spegnimento modem SIM800L...");
     
     // Inviamo il comando direttamente sulla UART del modem
