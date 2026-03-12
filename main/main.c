@@ -23,8 +23,8 @@
 
 // --- CONFIGURAZIONE ---
 
-#define BROKER_URL     "mqtt://picogalliiotserver.ddns.net:1883" // IP Mosquitto Pubblico
-#define APN            "internet.it" // Cambia con APN della tua SIM
+#define BROKER_URL     "mqtt://brokerMqtt:1883" // IP Mosquitto Pubblico
+#define APN            "APN" // Cambia con APN della tua SIM
 
 // --- VARIABILI NELLA MEMORIA RTC ---
 RTC_DATA_ATTR float last_temp = -100.0;
