@@ -57,6 +57,8 @@ static esp_modem_dce_t *dce;
 
 static QueueHandle_t gpio_evt_queue = NULL;
 
+int alarm_triggered_on_pin = -1;
+
 // --- Gestore dell'Interrupt (ISR) ---
 static void IRAM_ATTR gpio_isr_handler(void* arg) {
     uint32_t gpio_num = (uint32_t) arg;
@@ -228,6 +230,13 @@ void telemetry_task(void *pvParameters) {
         ESP_LOGE(TAG, "Errore DHT11");
     }
 
+    if (alarm_triggered_on_pin != -1) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "{\"alert\": \"WAKEUP_BY_SENSOR\", \"pin\": %d}", alarm_triggered_on_pin);
+        esp_mqtt_client_publish(client, "/casa/notifiche", msg, 0, 1, 1);
+        alarm_triggered_on_pin = -1; // Reset
+    }
+
     // Chiama la nuova funzione di sleep
     vai_in_deep_sleep_con_allarmi();
     vTaskDelete(NULL); 
@@ -310,12 +319,10 @@ void app_main(void) {
 
     switch (wakeup_reason) {
         case ESP_SLEEP_WAKEUP_EXT1: {
+
             // Risveglio da allarme!
             uint64_t pin_mask = esp_sleep_get_ext1_wakeup_status();
-            int pin_scatenante = __builtin_ctzll(pin_mask); // Trova quale pin ha attivato
-            ESP_LOGW(TAG, "RISVEGLIO DA ALLARME sul GPIO %d!", pin_scatenante);
-            
-            // Qui puoi impostare una variabile per inviare un messaggio MQTT prioritario
+            alarm_triggered_on_pin = __builtin_ctzll(pin_mask); 
             break;
         }
         case ESP_SLEEP_WAKEUP_TIMER:
