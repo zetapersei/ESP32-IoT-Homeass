@@ -34,6 +34,7 @@ RTC_DATA_ATTR float last_hum = -100.0;
 #define MAX_SLEEP_SEC 3600  // Massimo 1 ora di sonno
 
 #define DHT_GPIO 4
+#define MODEM_PWRKEY_PIN 13
 
 // Configurazione UART (GPIO 17 TX, 16 RX)
 #define UART_NUM UART_NUM_2
@@ -82,13 +83,38 @@ static esp_err_t read_dht_raw(uint8_t data[5]) {
 }
 
 void modem_power_down() {
-    const char *cmd = "AT+CSCLK=2\r\n";
+    const char *cmd = "AT+CPOWD=1\r\n";
     ESP_LOGI(TAG, "Spegnimento modem SIM800L...");
     
     // Inviamo il comando direttamente sulla UART del modem
     uart_write_bytes(UART_NUM_2, cmd, strlen(cmd));
     
     // Attendiamo che il modem risponda o si spenga (solitamente 2-3 secondi)
+    vTaskDelay(pdMS_TO_TICKS(3000));
+}
+
+void modem_power_on() {
+    ESP_LOGI(TAG, "Inizializzazione accensione modem...");
+    
+    // Configura il pin PWRKEY
+    gpio_reset_pin(MODEM_PWRKEY_PIN);
+    gpio_set_direction(MODEM_PWRKEY_PIN, GPIO_MODE_OUTPUT);
+
+    // Sequenza di accensione: 
+    // 1. Tieni alto (IDLE)
+    gpio_set_level(MODEM_PWRKEY_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // 2. Impulso LOW (per il SIM800L servono almeno 1.2 - 2 secondi)
+    ESP_LOGI(TAG, "Pulsante PWRKEY premuto...");
+    gpio_set_level(MODEM_PWRKEY_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(2000)); 
+    
+    // 3. Rilascia (TORNA ALTO)
+    gpio_set_level(MODEM_PWRKEY_PIN, 1);
+    ESP_LOGI(TAG, "Pulsante PWRKEY rilasciato. Modem in avvio.");
+    
+    // 4. Attendi che il modem si registri o sia pronto per i comandi AT
     vTaskDelay(pdMS_TO_TICKS(3000));
 }
 
@@ -206,6 +232,8 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    modem_power_on();
 
     // 2. Configurazione dell'interfaccia di rete PPP
     esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
