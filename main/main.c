@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "mqtt_client.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "hal/gpio_types.h"
 #include "esp_timer.h"
 #include "rom/ets_sys.h" // Per ets_delay_us
