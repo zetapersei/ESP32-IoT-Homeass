@@ -2,6 +2,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -37,6 +38,12 @@ RTC_DATA_ATTR float last_hum = -100.0;
 #define DHT_GPIO 4
 #define MODEM_PWRKEY_PIN 13
 
+// Definiamo i pin degli allarmi
+#define ALARM_PIN_1 32
+#define ALARM_PIN_2 33
+#define ALARM_PIN_3 34
+#define ALARM_PIN_4 35
+
 // Configurazione UART (GPIO 17 TX, 16 RX)
 #define UART_NUM UART_NUM_2
 
@@ -46,6 +53,36 @@ static const char *TAG = "IOT_NODE";
 static esp_mqtt_client_handle_t client;
 static esp_modem_dce_t *dce; 
 
+
+
+static QueueHandle_t gpio_evt_queue = NULL;
+
+// --- Gestore dell'Interrupt (ISR) ---
+static void IRAM_ATTR gpio_isr_handler(void* arg) {
+    uint32_t gpio_num = (uint32_t) arg;
+    // Invia il numero del pin che ha scatenato l'allarme alla coda
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
+// --- Task che processa gli allarmi ---
+void alarm_processor_task(void *pvParameters) {
+    uint32_t io_num;
+    char alarm_msg[64];
+    
+    while(1) {
+        // Resta in attesa di un evento dalla coda
+        if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+            int level = gpio_get_level(io_num);
+            ESP_LOGW(TAG, "ALLARME rilevato sul GPIO[%ld] Stato: %d", io_num, level);
+            
+            snprintf(alarm_msg, sizeof(alarm_msg), "{\"alarm_io\": %ld, \"status\": %d}", io_num, level);
+            
+            if (client != NULL) {
+                esp_mqtt_client_publish(client, "/casa/allarmi", alarm_msg, 0, 1, 0);
+            }
+        }
+    }
+}
 
 
 static esp_err_t read_dht_raw(uint8_t data[5]) {
@@ -183,6 +220,27 @@ void telemetry_task(void *pvParameters) {
         esp_sleep_enable_timer_wakeup(900 * 1000000); 
         esp_deep_sleep_start();
     }
+
+    // Definizione della maschera dei pin (GPIO 32, 33, 34, 35)
+#define ALARM_BITMASK ((1ULL<<GPIO_NUM_32) | (1ULL<<GPIO_NUM_33) | \
+                        (1ULL<<GPIO_NUM_34) | (1ULL<<GPIO_NUM_35))
+
+void vai_in_deep_sleep_con_allarmi() {
+    // 1. Spegnimento pulito delle periferiche
+    esp_mqtt_client_stop(client);
+    modem_power_down();
+
+    // 2. Configura il risveglio temporizzato (es. ogni 15 minuti)
+    esp_sleep_enable_timer_wakeup(900 * 1000000);
+
+    // 3. Configura il risveglio da sensori esterni (Allarmi)
+    // ESP_EXT1_WAKEUP_ANY_HIGH: si sveglia se uno dei pin va a 1 (es. PIR o contatto aperto)
+    // Se i tuoi sensori chiudono a massa (Normalmente Chiusi), usa ESP_EXT1_WAKEUP_ALL_LOW
+    esp_sleep_enable_ext1_wakeup(ALARM_BITMASK, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+    ESP_LOGI(TAG, "Deep Sleep attivo. Sveglia pronta per timer o allarmi.");
+    esp_deep_sleep_start();
+    }
 }
 
 // --- GESTORE EVENTI MQTT ---
@@ -257,6 +315,26 @@ void app_main(void) {
     esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
     esp_netif_t *esp_netif = esp_netif_new(&netif_ppp_config);
     assert(esp_netif);
+
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+
+    switch (wakeup_reason) {
+        case ESP_SLEEP_WAKEUP_EXT1: {
+            // Risveglio da allarme!
+            uint64_t pin_mask = esp_sleep_get_ext1_wakeup_status();
+            int pin_scatenante = __builtin_ctzll(pin_mask); // Trova quale pin ha attivato
+            ESP_LOGW(TAG, "RISVEGLIO DA ALLARME sul GPIO %d!", pin_scatenante);
+            
+            // Qui puoi impostare una variabile per inviare un messaggio MQTT prioritario
+            break;
+        }
+        case ESP_SLEEP_WAKEUP_TIMER:
+            ESP_LOGI(TAG, "Risveglio programmato per telemetria.");
+            break;
+        default:
+            ESP_LOGI(TAG, "Avvio normale o reset.");
+            break;
+    }
 
 
     modem_power_on();
