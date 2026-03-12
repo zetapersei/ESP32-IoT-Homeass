@@ -94,8 +94,10 @@ void telemetry_task(void *pvParameters) {
                 gpio_set_level(GPIO_NUM_25, 1);
             }
 
-            esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
-            ESP_LOGI(TAG, "DATI REALI INVIATI: %s", json_string);
+            if (client != NULL) {
+                esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
+                ESP_LOGI(TAG, "DATI REALI INVIATI: %s", json_string);
+        }
             
         } else {
             ESP_LOGE(TAG, "Errore lettura DHT11 (Check collegamenti/resistenza)");
@@ -176,6 +178,11 @@ void app_main(void) {
     esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
     esp_netif_t *esp_netif = esp_netif_new(&netif_ppp_config);
     assert(esp_netif);
+
+    // Inizializzazione del LED/Relè sul GPIO 25
+    gpio_reset_pin(GPIO_NUM_25);
+    gpio_set_direction(GPIO_NUM_25, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_25, 0); // Inizia spento
 
     // 3. Configurazione del Modem (DTE e DCE)
     esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
