@@ -43,6 +43,7 @@ static const char *TAG = "IOT_NODE";
 
 
 static esp_mqtt_client_handle_t client;
+static esp_modem_dce_t *dce; 
 
 static esp_err_t read_dht_raw(uint8_t data[5]) {
     uint8_t last_state = 1;
@@ -123,46 +124,42 @@ void modem_power_on() {
 void telemetry_task(void *pvParameters) {
     uint8_t data[5];
     uint8_t mac[6];
-    char json_string[150];
+    int rssi = 0, ber = 0; // ber è il bit error rate, di solito meno importante
+    char json_string[180];
+    
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    // 1. Leggi la qualità del segnale dal modem
+    // dce è l'oggetto creato in app_main (assicurati che sia accessibile o globale)
+    if (esp_modem_get_signal_quality(dce, &rssi, &ber) == ESP_OK) {
+        ESP_LOGI(TAG, "Qualità segnale GSM: RSSI=%d", rssi);
+    }
 
     if (read_dht_raw(data) == ESP_OK) {
         float h = (float)data[0];
         float t = (float)data[2];
 
-        // 1. RISPARMIO DATI: Invia solo se variazione > 0.5°C
         float diff_t = (t > last_temp) ? (t - last_temp) : (last_temp - t);
         
         if (diff_t >= 0.5 || last_temp == -100.0) {
             last_temp = t;
             
+            // Inseriamo l'RSSI nel JSON
             snprintf(json_string, sizeof(json_string), 
-                     "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f}", 
-                     mac[4], mac[5], t, h);
+                     "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f, \"rssi\":%d}", 
+                     mac[4], mac[5], t, h, rssi);
 
             if (client != NULL) {
                 esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
-                ESP_LOGI(TAG, "Dati inviati con successo.");
-                vTaskDelay(pdMS_TO_TICKS(2000)); // Buffer per MQTT
+                vTaskDelay(pdMS_TO_TICKS(2000));
             }
-        } else {
-            ESP_LOGI(TAG, "Variazione minima (%f). Salto l'invio.", diff_t);
         }
-
-        // 2. PROCEDURA DI SONNO
-        esp_mqtt_client_stop(client);
-        modem_power_down(); // Spegniamo il modem
-
-        ESP_LOGI(TAG, "Tutto spento. Entro in Deep Sleep...");
         
-        // Imposta il timer (es. 15 minuti = 900 secondi)
+        // Procedura di spegnimento e Deep Sleep
+        esp_mqtt_client_stop(client);
+        modem_power_down();
         esp_sleep_enable_timer_wakeup(900 * 1000000); 
         esp_deep_sleep_start();
-
-    } else {
-        ESP_LOGE(TAG, "Errore DHT11. Riprovo tra 10 secondi.");
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        esp_restart(); // Se il sensore fallisce, a volte un restart aiuta
     }
 }
 
@@ -255,7 +252,7 @@ void app_main(void) {
     esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(APN); // Cambia con APN della tua SIM
 
     // Creazione dell'oggetto modem per SIM800
-    esp_modem_dce_t *dce = esp_modem_new_dev(ESP_MODEM_DCE_SIM800, &dte_config, &dce_config, esp_netif);
+    dce = esp_modem_new_dev(ESP_MODEM_DCE_SIM800, &dte_config, &dce_config, esp_netif);
     assert(dce);
 
     // 4. Registrazione handler per l'IP via PPP
