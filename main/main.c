@@ -89,35 +89,42 @@ void telemetry_task(void *pvParameters) {
         float h = (float)data[0];
         float t = (float)data[2];
 
-        // LOGICA RISPARMIO DATI
+        // 1. Calcolo del Delta (Risparmio Dati)
         float diff_t = (t > last_temp) ? (t - last_temp) : (last_temp - t);
         
-        if (diff_t >= TEMP_THRESHOLD || last_temp == -100.0) {
+        // Invia solo se la variazione è > 0.5°C o se è il primo avvio
+        if (diff_t >= 0.5 || last_temp == -100.0) {
             last_temp = t;
-            last_hum = h;
-
+            
+            int64_t uptime = esp_timer_get_time() / 1000000;
             snprintf(json_string, sizeof(json_string), 
-                "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f}", 
-                mac[4], mac[5], t, h);
+                     "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f, \"up\":%lld}", 
+                     mac[4], mac[5], t, h, uptime);
 
             if (client != NULL) {
                 esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
-                ESP_LOGI(TAG, "Dati inviati. Ora entro in Deep Sleep...");
+                ESP_LOGI(TAG, "Dati inviati. Preparazione al sonno...");
                 
-                // --- PROCEDURA DI SPEGNIMENTO ---
-                esp_mqtt_client_stop(client);
-                // Qui potresti inviare "AT+CPOWD=1" al modem via UART per spegnerlo
-                
-                vTaskDelay(pdMS_TO_TICKS(2000)); // Tempo per finire l'invio
-                
-                // Dormi per 10 minuti (600 secondi)
-                esp_deep_sleep(600 * 1000000); 
+                // Lasciamo il tempo all'MQTT di completare l'invio (2 secondi)
+                vTaskDelay(pdMS_TO_TICKS(2000));
             }
         } else {
-            ESP_LOGI(TAG, "Variazione minima (%f), torno a dormire subito.", diff_t);
-            esp_deep_sleep(600 * 1000000);
+            ESP_LOGI(TAG, "Variazione minima (%f), salto l'invio MQTT.", diff_t);
         }
+
+        // 2. Configurazione del risveglio (es. tra 10 minuti)
+        uint64_t sleep_time_us = 600 * 1000000; // 600 secondi in microsecondi
+        ESP_LOGI(TAG, "Entro in Deep Sleep per 10 minuti...");
+        
+        esp_sleep_enable_timer_wakeup(sleep_time_us);
+        esp_deep_sleep_start(); // Questa funzione non ritorna mai
+        
+    } else {
+        ESP_LOGE(TAG, "Errore DHT11. Riprovo tra 30 secondi.");
+        esp_sleep_enable_timer_wakeup(30 * 1000000);
+        esp_deep_sleep_start();
     }
+
     vTaskDelete(NULL);
 }
 
