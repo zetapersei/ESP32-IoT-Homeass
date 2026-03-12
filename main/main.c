@@ -125,6 +125,35 @@ static esp_err_t read_dht_raw(uint8_t data[5]) {
     return ESP_FAIL;
 }
 
+
+void invia_discovery_home_assistant() {
+    char topic[128];
+    char payload[512];
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char node_id[20];
+    snprintf(node_id, sizeof(node_id), "esp32_%02X%02X", mac[4], mac[5]);
+
+    // 1. Configurazione Sensore Temperatura
+    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_temp/config", node_id);
+    snprintf(payload, sizeof(payload), 
+        "{\"name\":\"Temperatura Casa\", \"stat_t\":\"/casa/sensori\", \"unit_of_meas\":\"°C\", \"val_tpl\":\"{{ value_json.t }}\", \"unique_id\":\"%s_t\", \"dev_cla\":\"temperature\"}", node_id);
+    esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
+
+    // 2. Configurazione Sensore Umidità
+    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_hum/config", node_id);
+    snprintf(payload, sizeof(payload), 
+        "{\"name\":\"Umidità Casa\", \"stat_t\":\"/casa/sensori\", \"unit_of_meas\":\"%%\", \"val_tpl\":\"{{ value_json.h }}\", \"unique_id\":\"%s_h\", \"dev_cla\":\"humidity\"}", node_id);
+    esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
+
+    // 3. Configurazione Allarme (Binary Sensor)
+    snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/%s_alarm/config", node_id);
+    snprintf(payload, sizeof(payload), 
+        "{\"name\":\"Allarme Sensore 1\", \"stat_t\":\"/casa/allarmi\", \"val_tpl\":\"{{ 'ON' if value_json.status == 1 else 'OFF' }}\", \"unique_id\":\"%s_a1\", \"dev_cla\":\"motion\"}", node_id);
+    esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
+}
+
+
 void modem_power_down() {
     const char *cmd = "AT+CPOWD=1\r\n";
     ESP_LOGI(TAG, "Spegnimento modem SIM800L...");
@@ -249,6 +278,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT Connesso!");
+            invia_discovery_home_assistant();
             // Ci iscriviamo al topic dei comandi
             esp_mqtt_client_subscribe(client, "/casa/led", 0);
     
