@@ -31,3 +31,20 @@ Optimized for battery-powered applications using **Deep Sleep** and **Hardware P
 
 ## 📦 Installation & Setup
 1. Ensure you have **ESP-IDF v5.x** installed.
+
+## 🏠 Home Assistant Integration.
+The device automatically publishes discovery configurations. Once connected to your MQTT broker, the following entities will be created:
+
+- sensor.esp32_xxxx_temp (Temperature)
+- sensor.esp32_xxxx_hum (Humidity)
+- sensor.esp32_xxxx_rssi (GSM Signal Strength)
+- binary_sensor.esp32_xxxx_alarm (Motion/Security Sensor)
+
+## ⚠️ Important Notes
+**Power Supply:** The SIM800L requires peaks of up to 2A during transmission. Use a high-quality 3.7V LiPo battery or a robust 5V power source with a large capacitor (e.g., 1000µF).
+
+**GPIO 34/35:** These pins are input-only and lack internal pull-up resistors. Physical 10k resistors connected to 3.3V are mandatory to prevent false alarms.
+
+
+## 📝 License
+This project is licensed under the MIT License - see the **LICENSE** file for details.
