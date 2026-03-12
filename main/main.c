@@ -28,6 +28,8 @@
 RTC_DATA_ATTR float last_temp = -100.0;
 RTC_DATA_ATTR float last_hum = -100.0;
 
+
+
 #define TEMP_THRESHOLD 0.5  // Invia solo se cambia di 0.5 gradi
 #define MAX_SLEEP_SEC 3600  // Massimo 1 ora di sonno
 
@@ -79,6 +81,19 @@ static esp_err_t read_dht_raw(uint8_t data[5]) {
     return ESP_FAIL;
 }
 
+void modem_power_down() {
+    const char *cmd = "AT+CPOWD=1\r\n";
+    ESP_LOGI(TAG, "Spegnimento modem SIM800L...");
+    
+    // Inviamo il comando direttamente sulla UART del modem
+    uart_write_bytes(UART_NUM_2, cmd, strlen(cmd));
+    
+    // Attendiamo che il modem risponda o si spenga (solitamente 2-3 secondi)
+    vTaskDelay(pdMS_TO_TICKS(3000));
+}
+
+
+
 void telemetry_task(void *pvParameters) {
     uint8_t data[5];
     uint8_t mac[6];
@@ -89,43 +104,40 @@ void telemetry_task(void *pvParameters) {
         float h = (float)data[0];
         float t = (float)data[2];
 
-        // 1. Calcolo del Delta (Risparmio Dati)
+        // 1. RISPARMIO DATI: Invia solo se variazione > 0.5°C
         float diff_t = (t > last_temp) ? (t - last_temp) : (last_temp - t);
         
-        // Invia solo se la variazione è > 0.5°C o se è il primo avvio
         if (diff_t >= 0.5 || last_temp == -100.0) {
             last_temp = t;
             
-            int64_t uptime = esp_timer_get_time() / 1000000;
             snprintf(json_string, sizeof(json_string), 
-                     "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f, \"up\":%lld}", 
-                     mac[4], mac[5], t, h, uptime);
+                     "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f}", 
+                     mac[4], mac[5], t, h);
 
             if (client != NULL) {
                 esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
-                ESP_LOGI(TAG, "Dati inviati. Preparazione al sonno...");
-                
-                // Lasciamo il tempo all'MQTT di completare l'invio (2 secondi)
-                vTaskDelay(pdMS_TO_TICKS(2000));
+                ESP_LOGI(TAG, "Dati inviati con successo.");
+                vTaskDelay(pdMS_TO_TICKS(2000)); // Buffer per MQTT
             }
         } else {
-            ESP_LOGI(TAG, "Variazione minima (%f), salto l'invio MQTT.", diff_t);
+            ESP_LOGI(TAG, "Variazione minima (%f). Salto l'invio.", diff_t);
         }
 
-        // 2. Configurazione del risveglio (es. tra 10 minuti)
-        uint64_t sleep_time_us = 600 * 1000000; // 600 secondi in microsecondi
-        ESP_LOGI(TAG, "Entro in Deep Sleep per 10 minuti...");
-        
-        esp_sleep_enable_timer_wakeup(sleep_time_us);
-        esp_deep_sleep_start(); // Questa funzione non ritorna mai
-        
-    } else {
-        ESP_LOGE(TAG, "Errore DHT11. Riprovo tra 30 secondi.");
-        esp_sleep_enable_timer_wakeup(30 * 1000000);
-        esp_deep_sleep_start();
-    }
+        // 2. PROCEDURA DI SONNO
+        esp_mqtt_client_stop(client);
+        modem_power_down(); // Spegniamo il modem
 
-    vTaskDelete(NULL);
+        ESP_LOGI(TAG, "Tutto spento. Entro in Deep Sleep...");
+        
+        // Imposta il timer (es. 15 minuti = 900 secondi)
+        esp_sleep_enable_timer_wakeup(900 * 1000000); 
+        esp_deep_sleep_start();
+
+    } else {
+        ESP_LOGE(TAG, "Errore DHT11. Riprovo tra 10 secondi.");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        esp_restart(); // Se il sensore fallisce, a volte un restart aiuta
+    }
 }
 
 // --- GESTORE EVENTI MQTT ---
