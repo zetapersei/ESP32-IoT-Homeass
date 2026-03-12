@@ -15,6 +15,21 @@
 #include "esp_modem_config.h"
 #include "esp_modem_api.h"
 #include "esp_netif_ppp.h"
+#include "esp_sleep.h"
+
+
+
+// --- CONFIGURAZIONE ---
+
+#define BROKER_URL     "mqtt://picogalliiotserver.ddns.net:1883" // IP Mosquitto Pubblico
+#define APN            "internet.it" // Cambia con APN della tua SIM
+
+// --- VARIABILI NELLA MEMORIA RTC ---
+RTC_DATA_ATTR float last_temp = -100.0;
+RTC_DATA_ATTR float last_hum = -100.0;
+
+#define TEMP_THRESHOLD 0.5  // Invia solo se cambia di 0.5 gradi
+#define MAX_SLEEP_SEC 3600  // Massimo 1 ora di sonno
 
 #define DHT_GPIO 4
 
@@ -22,11 +37,6 @@
 #define UART_NUM UART_NUM_2
 
 static const char *TAG = "IOT_NODE";
-
-// --- CONFIGURAZIONE ---
-
-#define BROKER_URL     "mqtt://picogalliiotserver.ddns.net:1883" // IP Mosquitto Pubblico
-#define APN            "internet.it" // Cambia con APN della tua SIM
 
 
 static esp_mqtt_client_handle_t client;
@@ -70,41 +80,45 @@ static esp_err_t read_dht_raw(uint8_t data[5]) {
 }
 
 void telemetry_task(void *pvParameters) {
-
     uint8_t data[5];
     uint8_t mac[6];
     char json_string[150];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    
 
-    while (1) {
-        if (read_dht_raw(data) == ESP_OK) {
-            float h = (float)data[0];
-            float t = (float)data[2];
+    if (read_dht_raw(data) == ESP_OK) {
+        float h = (float)data[0];
+        float t = (float)data[2];
 
-            int64_t uptime = esp_timer_get_time() / 1000000;
+        // LOGICA RISPARMIO DATI
+        float diff_t = (t > last_temp) ? (t - last_temp) : (last_temp - t);
+        
+        if (diff_t >= TEMP_THRESHOLD || last_temp == -100.0) {
+            last_temp = t;
+            last_hum = h;
 
             snprintf(json_string, sizeof(json_string), 
-                "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f, \"up\":%lld}", 
-                mac[4], mac[5], t, h, uptime);
-
-            if (t > 30.0) { // Se la temperatura supera i 30 gradi
-                esp_mqtt_client_publish(client, "/casa/allarme", "{\"alert\": \"TEMPERATURA ELEVATA!\"}", 0, 1, 0);
-                ESP_LOGW(TAG, "Allarme inviato!");
-                gpio_set_level(GPIO_NUM_25, 1);
-            }
+                "{\"id\":\"ESP32_%02X%02X\", \"t\":%.1f, \"h\":%.1f}", 
+                mac[4], mac[5], t, h);
 
             if (client != NULL) {
                 esp_mqtt_client_publish(client, "/casa/sensori", json_string, 0, 1, 0);
-                ESP_LOGI(TAG, "DATI REALI INVIATI: %s", json_string);
-        }
-            
+                ESP_LOGI(TAG, "Dati inviati. Ora entro in Deep Sleep...");
+                
+                // --- PROCEDURA DI SPEGNIMENTO ---
+                esp_mqtt_client_stop(client);
+                // Qui potresti inviare "AT+CPOWD=1" al modem via UART per spegnerlo
+                
+                vTaskDelay(pdMS_TO_TICKS(2000)); // Tempo per finire l'invio
+                
+                // Dormi per 10 minuti (600 secondi)
+                esp_deep_sleep(600 * 1000000); 
+            }
         } else {
-            ESP_LOGE(TAG, "Errore lettura DHT11 (Check collegamenti/resistenza)");
+            ESP_LOGI(TAG, "Variazione minima (%f), torno a dormire subito.", diff_t);
+            esp_deep_sleep(600 * 1000000);
         }
-
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Aspetta 5 secondi
     }
+    vTaskDelete(NULL);
 }
 
 // --- GESTORE EVENTI MQTT ---
